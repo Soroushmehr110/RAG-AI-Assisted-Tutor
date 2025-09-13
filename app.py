@@ -1,169 +1,146 @@
-# app.py — Streamlit UI (vision-first, task-aware)
+# app.py — Streamlit UI (vision-first, 0–4 grading + hint on incorrect)
+# - Auto-runs as soon as an image is uploaded
+# - No mock mode, no OCR, no HEIC-specific handling
+
 import os
 import json
 import tempfile
 from datetime import datetime
-from urllib.parse import quote
 
 import streamlit as st
-
 from math_image_grader import run_grader, grade_with_equation_and_task
 
 st.set_page_config(
-    page_title="Math Teaching Assistant (Vision-first, Task-aware)",
+    page_title="Math Teaching Assistant (Vision + 0–4 grading)",
     page_icon="🧮",
-    layout="wide",
+    layout="wide"
 )
 
-# ---------------- Sidebar ----------------
+# -------- Sidebar --------
 st.sidebar.header("Inputs")
 uploaded_file = st.sidebar.file_uploader(
     "Upload an image of the problem",
-    type=["png", "jpg", "jpeg", "webp", "heic", "pdf"],
+    type=["png", "jpg", "jpeg", "webp"]
 )
 grade_input = st.sidebar.text_input("Student grade level", "11th grade")
 
-use_vision = st.sidebar.checkbox("Use Vision (no OCR)", value=True)
-os.environ["USE_VISION_FIRST"] = "1" if use_vision else "0"
+# Keep timeout configurable (honored by the backend)
+os.environ["OPENAI_TIMEOUT"] = os.environ.get("OPENAI_TIMEOUT", "30")
+debug_on = st.sidebar.checkbox("Show debug/errors during run", value=True)
 
-run_button = st.sidebar.button("Run")
+# -------- Manual mode (optional) --------
+with st.expander("Manual mode (paste equation & student attempt)"):
+    man_equation = st.text_area("Equation (LaTeX or text)", value="", height=120, key="_manual_eq")
+    man_student  = st.text_area("Student attempt (text)", value="", height=120, key="_manual_stu")
+    if st.button("Grade manual input"):
+        try:
+            task_obj = {"task_type": "other", "parameters": {}, "question_text": "Grade this solution."}
+            graded = grade_with_equation_and_task(
+                man_equation.strip(),
+                grade_input,
+                task_obj,
+                man_student.strip()
+            )
+            st.success("Graded (manual mode). See results below.")
+            st.session_state["_manual_solution"] = graded
+        except Exception as e:
+            st.error("Manual grading failed.")
+            if debug_on:
+                st.exception(e)
 
-# ---------------- Helpers ----------------
-def save_temp_file(upload) -> str:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix="-" + upload.name.replace(" ", "_"))
-    tmp.write(upload.read())
-    tmp.flush()
-    return tmp.name
+# -------- Image mode (auto-run on upload) --------
+st.markdown("---")
+st.markdown("## Image mode")
 
-def download_link_for_json(data: dict, path: str) -> str:
-    payload = quote(json.dumps(data), safe="")
-    filename = path.split("/")[-1]
-    return f'<a href="data:application/json;charset=utf-8,{payload}" download="{filename}">Download JSON</a>'
+combined = None
+human_summary = ""
+solution = None
 
-def safe_markdown(text: str):
-    if text:
-        st.markdown(text)
-
-# ---------------- Main ----------------
-st.title("🧮 Math Teaching Assistant (Vision-first, Task-aware)")
-st.write(
-    "This app reads your **image** directly to extract the *equation* **and** the *task* "
-    "(e.g., evaluate at x=1, solve roots, vertex, intercepts), validates it, and then explains the solution step-by-step. "
-    "If vision fails, you can still edit the fields and re-run."
-)
-
-if run_button:
-    if uploaded_file is None:
-        st.error("Please upload an image first.")
-        st.stop()
-
-    tmp_path = save_temp_file(uploaded_file)
-    st.success(f"Saved to `{tmp_path}`")
-
-    out_json_path = f"grader_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    combined, human_summary = run_grader(tmp_path, grade_input, out_json_path)
-
-    # Always show the uploaded image for context
-    with st.expander("Uploaded image preview", expanded=True):
-        st.image(tmp_path, caption=uploaded_file.name, use_column_width=True)
-
-    # ---------------- Detected equation (editable) ----------------
-    st.markdown("---")
-    st.subheader("Detected equation (editable)")
-
-    eq_candidates = []
+if uploaded_file is not None:
     try:
-        for item in combined.get("extracted", {}).get("problem_definition", []):
-            if isinstance(item, dict) and item.get("type") == "equation":
-                eq_candidates.append(item.get("latex"))
-    except Exception:
-        pass
-    eq_text = eq_candidates[0] if eq_candidates else ""
-    eq_text = st.text_input(
-        "LaTeX / plain equation",
-        value=eq_text,
-        help="Fix any extraction mistakes here (e.g., add missing ^ or signs).",
-    )
-    if eq_text:
-        # Show LaTeX rendering for quick visual check
-        st.latex(eq_text if eq_text.strip().startswith("$") else f"{eq_text}")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{uploaded_file.name}") as tmp:
+            tmp.write(uploaded_file.getbuffer())
+            tmp_path = tmp.name
 
-    # ---------------- Detected task (editable) ----------------
-    st.markdown("---")
-    st.subheader("Detected task (editable)")
+        with st.spinner("Reading the image and grading..."):
+            combined, human_summary = run_grader(tmp_path, grade_input, out_json_path=None)
 
-    # try both locations (depending on which version of the backend)
-    det_task = (
-        combined.get("extracted", {}).get("task")
-        or combined.get("extracted", {}).get("raw_vision", {}).get("task")
-        or combined.get("extracted", {}).get("raw_vision", {})  # in case task got nested oddly
-        or {}
-    )
+        st.success("Done.")
+        st.caption(human_summary or "")
 
-    task_types = [
-        "evaluate",
-        "solve_roots",
-        "vertex",
-        "intercepts",
-        "graph",
-        "simplify",
-        "differentiate",
-        "integrate",
-        "other",
-    ]
-    default_idx = task_types.index(det_task.get("task_type", "other")) if det_task.get("task_type", "other") in task_types else task_types.index("other")
-    task_type = st.selectbox("Task type", task_types, index=default_idx)
+        # ---- Show what we extracted (text + nicely rendered formula) ----
+        extracted = combined.get("extracted", {}) or {}
+        eq = (extracted.get("equation") or {})
+        task = (extracted.get("task") or {})
+        student_attempt = extracted.get("student_attempt") or ""
 
-    params = det_task.get("parameters") or {}
-    # Only meaningful for evaluate; harmless otherwise
-    x_val = st.number_input("x (for evaluate)", value=float(params.get("x", 0.0)))
-    question_text = st.text_input("Question text (optional)", value=det_task.get("question_text", ""))
-    notes_text = st.text_input("Notes (optional)", value=det_task.get("notes", ""))
+        st.markdown("### What we detected from the image")
+        # Problem text
+        st.markdown("**Problem text (task):**")
+        st.write(task.get("question_text") or "(none)")
+        # Equation (rendered first, fallback to ASCII, then raw LaTeX)
+        st.markdown("**Equation:**")
+        eq_ltx = (eq.get("latex") or "").strip()
+        eq_ascii = (eq.get("ascii") or "").strip()
+        if eq_ltx:
+            try:
+                st.latex(eq_ltx)  # pretty, typeset math
+            except Exception:
+                pass
+        if eq_ascii:
+            st.code(eq_ascii)
+        if eq_ltx:
+            with st.expander("Show raw LaTeX (debug)"):
+                st.code(eq_ltx)
 
-    edited_task = {
-        "task_type": task_type,
-        "parameters": {"x": x_val} if task_type == "evaluate" else params,
-        "question_text": question_text,
-        "notes": notes_text,
-    }
+        # Student attempt
+        st.markdown("**Student attempt (as text):**")
+        st.code(student_attempt or "(none)")
 
-    # ---------------- Actions ----------------
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Re-run grading with edited equation & task"):
-            if not eq_text.strip():
-                st.error("Please provide an equation above before re-running.")
-            else:
-                graded = grade_with_equation_and_task(eq_text.strip(), grade_input, edited_task)
-                combined["solution"] = graded
-                combined.setdefault("extracted", {})["task"] = edited_task
-                st.success("Re-ran grading with your edits.")
+        # Show extraction JSON for full transparency
+        with st.expander("Extraction JSON (full)"):
+            st.code(json.dumps(extracted, ensure_ascii=False, indent=2))
 
-    with col2:
-        st.write("")  # spacer
-        st.write("")
+        solution = combined.get("solution")
 
-    # ---------------- Render solution ----------------
-    st.markdown("---")
-    st.subheader("Solution")
-    sol = combined.get("solution")
-    if not sol:
-        st.info("No solution produced yet. You can edit the equation/task above and click re-run.")
-    else:
-        steps = sol.get("steps", [])
-        for i, s in enumerate(steps, start=1):
-            st.markdown(f"**Step {i}:**")
-            safe_markdown(str(s))
-        final = sol.get("final_answer")
-        if final:
-            st.markdown("**Final answer:**")
-            safe_markdown(str(final))
-        conf = sol.get("solution_confidence")
-        if conf is not None:
-            st.caption(f"Solution confidence: {conf}")
+        # Offer download of full JSON
+        st.download_button(
+            label="⬇️ Download result JSON",
+            data=json.dumps(combined, ensure_ascii=False, indent=2),
+            file_name=f"grader_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+            use_container_width=True
+        )
 
-    # ---------------- Debug + Download ----------------
-    with st.expander("Raw outputs (debug)"):
-        st.json(combined)
+    except Exception as e:
+        st.error("Image grading failed.")
+        if debug_on:
+            st.exception(e)
 
-    st.markdown(download_link_for_json(combined, out_json_path), unsafe_allow_html=True)
+# -------- Results panel --------
+st.markdown("---")
+st.markdown("## Grading Result (0–4)")
+
+if solution is None:
+    solution = st.session_state.get("_manual_solution")
+
+if not solution:
+    st.info("No grade to show yet. Upload an image (or use Manual mode) to see results here.")
+else:
+    st.write(f"**Grade:** {solution.get('grade')}")
+    st.write(f"**Why:** {solution.get('explanation')}")
+    st.write("**Feedback on steps:**")
+    for fb in solution.get("steps_feedback", []) or []:
+        st.markdown(f"- {fb}")
+
+    # ---- Show a FIRST HINT if the student's final answer is NOT correct (hide 'false') ----
+    verdict = (solution.get("final_answer_correct") or "").strip().lower()
+    if verdict == "false":
+        first_hint = (solution.get("first_hint") or "").strip()
+        if first_hint:
+            st.markdown("**Hint to start:**")
+            st.info(first_hint)
+        else:
+            # Fallback hint if model didn't provide one
+            st.markdown("**Hint to start:**")
+            st.info("Find a common denominator, combine the fractions carefully, and note where denominators are zero.")

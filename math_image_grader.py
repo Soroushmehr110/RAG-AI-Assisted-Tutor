@@ -1,262 +1,278 @@
 """
-math_image_grader.py — Vision-first, task-aware pipeline
-- Vision extracts BOTH:
-  (A) the main equation (LaTeX + ASCII)
-  (B) the task intent (evaluate/solve_roots/vertex/intercepts/graph/simplify/other) + parameters (e.g., x=1)
-- Validator handles equalities (lhs=rhs) by converting to (lhs)-(rhs) and normalizes implicit multiplication.
-- Grader is task-aware and produces the correct kind of steps/answer for the detected task.
+math_image_grader.py — Vision-first pipeline with 0–4 grading and hinting.
+- No mock mode
+- No OCR fallback (vision-only extraction)
+- No HEIC-specific logic
+- Returns a first hint when the student's final answer is incorrect
+- Robust JSON parsing + response_format to avoid JSONDecodeError
 """
 
 from __future__ import annotations
-import os, json, base64, logging, re as _re
+import os
+import io
+import json
+import base64
 from typing import Dict, Any, Optional, List, Tuple
-from io import BytesIO
 from PIL import Image, ImageOps
-import numpy as np
 
-# Optional: SymPy for validation
-try:
-    import sympy as sp
-except Exception:
-    sp = None
+__all__ = ["extract_from_image", "run_grader", "grade_with_equation_and_task"]
 
-# OpenAI clients (support both new and legacy)
-try:
-    from openai import OpenAI
-    _HAS_NEW = True
-except Exception:
-    _HAS_NEW = False
-
-try:
-    import openai as _LEGACY_OPENAI
-except Exception:
-    _LEGACY_OPENAI = None
-
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
+# ---------------- Config ----------------
 OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
 OPENAI_TEXT_MODEL   = os.getenv("OPENAI_TEXT_MODEL",   "gpt-4o-mini")
-USE_VISION_FIRST    = os.getenv("USE_VISION_FIRST", "1") == "1"
+OPENAI_TIMEOUT      = float(os.getenv("OPENAI_TIMEOUT", "30"))
 
-# ---------------------------
-# OpenAI helpers
-# ---------------------------
-def _require_api_key():
+# ---------------- OpenAI wrappers ----------------
+_HAS_NEW_SDK = True
+try:
+    from openai import OpenAI
+except Exception:
+    _HAS_NEW_SDK = False
+
+try:
+    import openai as _OPENAI_LEGACY
+except Exception:
+    _OPENAI_LEGACY = None
+
+
+def _require_api_key() -> None:
     if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Please set OPENAI_API_KEY")
+        raise RuntimeError("Missing OPENAI_API_KEY. Please set it before running the app.")
 
-def _openai_chat(messages: List[Dict[str, Any]], model: str, temperature: float = 0) -> str:
+
+def _extract_first_json_obj(s: str) -> Dict[str, Any]:
+    """
+    Robustly extract the FIRST balanced {...} JSON object from a string, ignoring any extra text
+    before/after, and respecting braces inside quoted strings.
+    """
+    if not s:
+        return {}
+    # Fast path
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    in_str = False
+    esc = False
+    depth = 0
+    start = -1
+    for i, ch in enumerate(s):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == '}':
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and start != -1:
+                        candidate = s[start : i + 1]
+                        try:
+                            return json.loads(candidate)
+                        except Exception:
+                            # continue scanning in case a later balanced block parses
+                            start = -1
+    return {}
+
+
+def _openai_chat(
+    messages: List[Dict[str, Any]],
+    model: str,
+    temperature: float = 0,
+    force_json: bool = True,
+) -> str:
+    """Call OpenAI chat completions with a timeout; supports new and legacy SDKs."""
     _require_api_key()
-    if _HAS_NEW:
-        client = OpenAI()
-        resp = client.chat.completions.create(model=model, temperature=temperature, messages=messages)
-        return resp.choices[0].message.content.strip()
-    if _LEGACY_OPENAI is None:
-        raise RuntimeError("OpenAI SDK not available")
-    resp = _LEGACY_OPENAI.ChatCompletion.create(model=model, temperature=temperature, messages=messages)
-    return resp["choices"][0]["message"]["content"].strip()
+    if _HAS_NEW_SDK:
+        client = OpenAI().with_options(timeout=OPENAI_TIMEOUT)
+        kwargs = dict(model=model, temperature=temperature, messages=messages)
+        if force_json:
+            kwargs["response_format"] = {"type": "json_object"}
+        resp = client.chat.completions.create(**kwargs)
+        return resp.choices[0].message.content or ""
+    if _OPENAI_LEGACY is None:
+        raise RuntimeError("OpenAI SDK not available.")
+    os.environ["OPENAI_TIMEOUT"] = str(OPENAI_TIMEOUT)  # best-effort for legacy
+    # Legacy SDK doesn't support response_format; rely on our robust extractor
+    resp = _OPENAI_LEGACY.ChatCompletion.create(model=model, temperature=temperature, messages=messages)
+    return resp["choices"][0]["message"]["content"] or ""
 
-def _encode_image_b64(path: str) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+# ---------------- Helpers ----------------
+def _encode_image_b64_all_orientations(path: str) -> List[str]:
+    """Open image, EXIF-correct, convert to PNG; return 0/90/180/270 orientations as base64 strings."""
+    with Image.open(path) as im:
+        im = ImageOps.exif_transpose(im.convert("RGB"))
+    variants = [im, im.rotate(90, expand=True), im.rotate(180, expand=True), im.rotate(270, expand=True)]
+    outs: List[str] = []
+    for v in variants:
+        buf = io.BytesIO()
+        v.save(buf, format="PNG")
+        outs.append(base64.b64encode(buf.getvalue()).decode("utf-8"))
+    return outs
 
-# ---------------------------
-# Vision: equation extraction
-# ---------------------------
-VISION_EQUATION_SYS = (
-    "You are a rigorous math transcription assistant. Read the photo and transcribe the main function/equation that defines f(x) (or the central formula). "
-    "Do not solve.\n\n"
-    "Output JSON only:\n"
-    "{\n"
-    '  "equation_latex": "<LaTeX, e.g., f(x) = -2x^{2} - 2x + 4>",\n'
-    '  "equation_ascii": "<ASCII, e.g., f(x) = -2*x^2 - 2*x + 4>",\n'
-    '  "found_equals": true,\n'
-    '  "notes": "<where you found it; any uncertainty>"\n'
-    "}\n"
-    "Rules: preserve signs/exponents; if multiple appear, pick the function definition with f(x)=...; valid JSON only."
-)
 
-def call_vision_extract_equation(image_path: str, model: Optional[str] = None) -> Dict[str, Any]:
-    model = model or OPENAI_VISION_MODEL
-    img_b64 = _encode_image_b64(image_path)
-    messages = [
-        {"role": "system", "content": VISION_EQUATION_SYS},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Photo attached. Return JSON per spec."},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-        ]}
-    ]
-    raw = _openai_chat(messages, model=model, temperature=0)
-    try:
-        return json.loads(raw)
-    except Exception:
-        s, e = raw.find("{"), raw.rfind("}")
-        return json.loads(raw[s:e+1]) if s != -1 and e != -1 else {}
-
-# ---------------------------
-# Vision: task extraction
-# ---------------------------
-VISION_TASK_SYS = (
-    "You extract ONLY the task the problem asks for, not the equation. "
-    "Read the photo and summarize the requested action.\n\n"
-    "Output JSON only:\n"
-    "{\n"
-    '  "task_type": "evaluate|solve_roots|vertex|intercepts|graph|simplify|differentiate|integrate|other",\n'
-    '  "parameters": {"x": 1},\n'
-    '  "question_text": "<verbatim or short paraphrase of the instruction>",\n'
-    '  "notes": "<uncertainty or alternatives if any>"\n'
-    "}\n"
-    "Rules:\n"
-    "- If it says evaluate f(a), task_type=evaluate and parameters.x=a.\n"
-    "- If it says solve f(x)=0 or find zeros/roots/x-intercepts, task_type=solve_roots.\n"
-    "- If it asks vertex, task_type=vertex; if intercepts, task_type=intercepts; if graph features, task_type=graph.\n"
-    "- If unclear, set task_type=other and summarize in notes.\n"
-    "- JSON only."
-)
-
-def call_vision_extract_task(image_path: str, model: Optional[str] = None) -> Dict[str, Any]:
-    model = model or OPENAI_VISION_MODEL
-    img_b64 = _encode_image_b64(image_path)
-    messages = [
-        {"role": "system", "content": VISION_TASK_SYS},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Photo attached. Return JSON per spec."},
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
-        ]}
-    ]
-    raw = _openai_chat(messages, model=model, temperature=0)
-    try:
-        return json.loads(raw)
-    except Exception:
-        s, e = raw.find("{"), raw.rfind("}")
-        return json.loads(raw[s:e+1]) if s != -1 and e != -1 else {}
-
-# ---------------------------
-# Validation helpers
-# ---------------------------
-def _normalize_for_sympy(expr: str) -> str:
-    if not expr:
-        return expr
-    expr = expr.replace("−", "-").replace("–", "-").replace("—", "-")
-    # 2x -> 2*x ; x2 -> x*2
-    expr = _re.sub(r'(\d)\s*([A-Za-z])', r'\1*\2', expr)
-    expr = _re.sub(r'([A-Za-z])\s*(\d)', r'\1*\2', expr)
-    # )x -> )*x ; x( -> x*( ; 3( -> 3*(
-    expr = _re.sub(r'(\))\s*([A-Za-z])', r'\1*\2', expr)
-    expr = _re.sub(r'([A-Za-z])\s*\(', r'\1*(', expr)
-    expr = _re.sub(r'(\d)\s*\(', r'\1*(', expr)
-    expr = _re.sub(r'\)\s*(\d)', r')*\1', expr)
-    return expr
-
-def _equation_to_single_expr(expr_text: str) -> str:
-    s = expr_text.strip()
-    # If it's f(x)=... or y=..., just use RHS
-    if "=" in s and (s.lower().startswith("f(x)") or s.lower().startswith("y")):
-        return s.split("=", 1)[1].strip()
-    if "=" in s:
-        lhs, rhs = s.split("=", 1)
-        return f"({lhs.strip()}) - ({rhs.strip()})"
-    return s
-
-def validate_polynomial(expr_text: str) -> bool:
-    """Accept any polynomial in x (including equalities)."""
-    if sp is None:
-        return True
-    try:
-        x = sp.symbols('x')
-        expr = _equation_to_single_expr(expr_text)
-        expr_py = expr.replace("^{", "**(").replace("}", ")").replace("^", "**")
-        expr_py = _normalize_for_sympy(expr_py)
-        poly = sp.sympify(expr_py, dict(x=x))
-        sp.Poly(poly, x)  # will raise if not a polynomial in x
-        return True
-    except Exception:
+def _soft_accept_equation(eq_ltx: str) -> bool:
+    if not eq_ltx:
         return False
+    s = eq_ltx.lower()
+    return "=" in s or r"\approx" in s
 
-def pick_equation(vis_eq: Dict[str, Any]) -> str:
-    return (vis_eq or {}).get("equation_latex") or (vis_eq or {}).get("equation_ascii") or ""
-
-# ---------------------------
-# Grader (task-aware)
-# ---------------------------
-GRADE_SYS = (
-    "You are a patient math tutor. You will be given the problem's function/equation and a task object. "
-    "Follow the task exactly. Explain step-by-step, then give a concise final answer.\n\n"
-    "Return strict JSON only:\n"
-    "{\n"
-    '  "steps": ["...","..."],\n'
-    '  "final_answer": "<string>",\n'
-    '  "solution_confidence": 0.0\n'
-    "}\n"
-    "Rules:\n"
-    "- Do not invent inputs. If task_type=evaluate but parameters.x is missing, explain what is missing and leave final_answer empty.\n"
-    "- If task_type=solve_roots, solve f(x)=0 (zeros/x-intercepts) using factoring or quadratic formula.\n"
-    "- If task_type=vertex, compute vertex (h,k) and state axis of symmetry.\n"
-    "- If task_type=intercepts, give x- and y-intercepts.\n"
-    "- Keep language at the student's grade level; be clear and brief."
+# ---------------- Vision prompts ----------------
+VISION_EQUATION_SYS = (
+    "You are a transcription assistant for math photos. "
+    "Detect ONE main equation on the page (prefer the most complete). "
+    "Return strict JSON: {\"equation_latex\":\"...\",\"equation_ascii\":\"...\",\"found_equals\":true|false,\"notes\":\"...\"}"
 )
 
-def grade_with_equation_and_task(equation: str, grade_level: str, task: Dict[str, Any], model: Optional[str] = None) -> Dict[str, Any]:
+VISION_TASK_SYS = (
+    "Extract ONLY the task/instruction statement from the photo. "
+    "Return strict JSON: {\"task_type\":\"evaluate|solve_root|simplify|differentiate|integrate|other\",\"parameters\":{},\"question_text\":\"...\",\"notes\":\"...\"}"
+)
+
+VISION_STUDENT_SYS = (
+    "Extract ONLY the student's written/typed attempt (not the problem text). "
+    "Return strict JSON: {\"student_answer\":\"...\",\"notes\":\"...\"}"
+)
+
+GRADE_SYS = (
+    "You are a strict but fair math grader. Grade on 0–4 scale:\n"
+    "0 = no answer; 1 = wrong; 3 = partially correct; 4 = fully correct.\n"
+    "Check domain restrictions and verify solutions conceptually (no long derivations).\n"
+    "If the student's final answer is NOT correct, provide ONE short, actionable 'first hint'—"
+    "a gentle next step without revealing the solution.\n"
+    'Return JSON ONLY with keys exactly:\n'
+    '{"steps_feedback":[...], "final_answer_correct":"true|false", "grade":0, "explanation":"...", "first_hint":""}\n'
+    "- Keep first_hint under 25 words; do not include the final answer."
+)
+
+# ---------------- Vision calls (send 4 orientations) ----------------
+def _vision_call(image_path: str, system_prompt: str) -> Dict[str, Any]:
+    b64s = _encode_image_b64_all_orientations(image_path)
+    content = [{"type": "text", "text": "Photo attached. Return JSON only per spec."}]
+    content += [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b}"}} for b in b64s]
+    raw = _openai_chat(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": content}],
+        model=OPENAI_VISION_MODEL,
+        temperature=0,
+        force_json=True,
+    )
+    # Even with response_format, keep robust fallback for legacy SDK or imperfect outputs.
+    return _extract_first_json_obj(raw)
+
+
+def call_vision_extract_equation(image_path: str) -> Dict[str, Any]:
+    return _vision_call(image_path, VISION_EQUATION_SYS)
+
+
+def call_vision_extract_task(image_path: str) -> Dict[str, Any]:
+    return _vision_call(image_path, VISION_TASK_SYS)
+
+
+def call_vision_extract_student_answer(image_path: str) -> Dict[str, Any]:
+    d = _vision_call(image_path, VISION_STUDENT_SYS)
+    if not isinstance(d, dict):
+        return {"student_answer": "", "notes": "parse_error"}
+    d.setdefault("student_answer", "")
+    return d
+
+# ---------------- Public grading ----------------
+def grade_with_equation_and_task(
+    equation: str,
+    grade_level: str,
+    task: Dict[str, Any],
+    student_answer: str,
+    model: Optional[str] = None
+) -> Dict[str, Any]:
+    """Use a text model to grade the student's solution and (if wrong) produce a first hint."""
     model = model or OPENAI_TEXT_MODEL
     user = {
         "role": "user",
-        "content": (
-            f"Equation: {equation}\n"
-            f"Task object: {json.dumps(task, ensure_ascii=False)}\n"
-            f"Student grade level: {grade_level}\n"
-            "Follow the JSON schema exactly."
-        )
+        "content": [
+            {"type": "text", "text": f"Equation (LaTeX): {equation}"},
+            {"type": "text", "text": f"Task: {json.dumps(task, ensure_ascii=False)}"},
+            {"type": "text", "text": f"Student attempt: {student_answer}"},
+            {"type": "text", "text": f"Grade level: {grade_level}"}
+        ]
     }
-    raw = _openai_chat([{"role": "system", "content": GRADE_SYS}, user], model=model, temperature=0)
-    try:
-        return json.loads(raw)
-    except Exception:
-        s, e = raw.find("{"), raw.rfind("}")
-        return json.loads(raw[s:e+1]) if s != -1 and e != -1 else {"steps": [], "final_answer": "", "solution_confidence": 0.0}
+    raw = _openai_chat(
+        [{"role": "system", "content": GRADE_SYS}, user],
+        model=model,
+        temperature=0,
+        force_json=True,
+    )
+    res = _extract_first_json_obj(raw)
 
-# ---------------------------
-# Public entry points
-# ---------------------------
+    # Guardrails / defaults
+    if "grade" not in res:
+        res["grade"] = 0 if not (student_answer or "").strip() else 3
+        res.setdefault("explanation", "Auto-fallback grade.")
+    res.setdefault("steps_feedback", [])
+    res.setdefault("final_answer_correct", "")
+    res.setdefault("first_hint", "")
+
+    return res
+
+# ---------------- Orchestrator ----------------
 def extract_from_image(image_path: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"problem_definition": [], "raw_vision": None, "task": None, "metadata": {"notes": []}}
+    """Vision-first extraction: equation, task, and student's attempt."""
+    # 1) Equation (LaTeX + ASCII)
+    eqd = call_vision_extract_equation(image_path)
+    eq_item = {}
+    if isinstance(eqd, dict) and (eqd.get("found_equals") or _soft_accept_equation((eqd.get("equation_latex") or ""))):
+        eq_item = {
+            "latex": (eqd.get("equation_latex") or "").strip(),
+            "ascii": (eqd.get("equation_ascii") or "").strip(),
+        }
 
-    if USE_VISION_FIRST:
-        try:
-            vis_eq = call_vision_extract_equation(image_path)
-            vis_task = call_vision_extract_task(image_path)
-            out["raw_vision"] = {"equation": vis_eq}
-            out["task"] = vis_task
+    # 2) Task
+    task = call_vision_extract_task(image_path)
+    if not isinstance(task, dict):
+        task = {}
 
-            eq = pick_equation(vis_eq)
-            if eq and validate_polynomial(eq):
-                out["problem_definition"].append({
-                    "id": "equation_normalized",
-                    "type": "equation",
-                    "latex": eq,
-                    "notes": "chosen_from=vision"
-                })
-            else:
-                out["metadata"]["notes"].append("Vision extracted equation but failed validation or was empty.")
-        except Exception as e:
-            out["metadata"]["notes"].append(f"Vision error: {e}")
-    return out
+    # 3) Student's attempt
+    stud = call_vision_extract_student_answer(image_path)
+    student_attempt = stud.get("student_answer", "") if isinstance(stud, dict) else ""
 
-def run_grader(image_path: str, grade_level: str, out_json_path: str = "grader_output.json") -> Tuple[Dict[str, Any], str]:
+    return {
+        "equation": eq_item,
+        "task": task,
+        "student_attempt": student_attempt,
+        "metadata": {}
+    }
+
+
+def run_grader(image_path: str, grade_level: str, out_json_path: Optional[str] = None) -> Tuple[Dict[str, Any], str]:
+    """
+    End-to-end: extract + grade. If out_json_path is provided, write results to it.
+    """
     extracted = extract_from_image(image_path)
-    eq_item = next((it for it in extracted["problem_definition"] if it.get("id") == "equation_normalized"), None)
-    task = extracted.get("raw_vision", {}).get("task") or extracted.get("task")  # support older callers
-
+    eq_item = extracted.get("equation") or {}
     result: Dict[str, Any] = {"extracted": extracted, "solution": None}
-    human_summary = ""
+    human_summary = "No valid equation detected."
 
     if eq_item:
-        eq = eq_item.get("latex", "")
-        task_obj = task or {"task_type": "other", "parameters": {}, "question_text": "", "notes": "No task detected; provide general guidance."}
-        graded = grade_with_equation_and_task(eq, grade_level, task_obj)
+        graded = grade_with_equation_and_task(
+            equation=eq_item.get("latex", "").strip(),
+            grade_level=grade_level,
+            task=extracted.get("task") or {},
+            student_answer=extracted.get("student_attempt", "")
+        )
         result["solution"] = graded
-        human_summary = f"Detected equation: {eq}. Task: {task_obj.get('task_type','other')}."
+        human_summary = "Equation extracted; grading complete."
 
-    with open(out_json_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+    # Only write if a real path was supplied
+    if out_json_path:
+        with open(out_json_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+
     return result, human_summary

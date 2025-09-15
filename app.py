@@ -89,6 +89,32 @@ if uploaded_file is not None:
                 pass
         if eq_ascii:
             st.code(eq_ascii)
+
+        # --- NEW: side-by-side input image + extracted text/formula ---
+        st.markdown("### Preview")
+        col_img, col_text = st.columns(2, gap="large")
+
+        with col_img:
+            st.markdown("**Input image**")
+            st.image(tmp_path, use_column_width=True)
+
+        with col_text:
+            st.markdown("**Extracted problem text:**")
+            st.write(task.get("question_text") or "(none)")
+
+            st.markdown("**Extracted equation:**")
+            if eq_ltx:
+                try:
+                    st.latex(eq_ltx)   # nicely rendered math
+                except Exception:
+                    pass
+            if eq_ascii:
+                # show ascii either as fallback or alongside LaTeX
+                st.code(eq_ascii)
+
+            st.markdown("**Student attempt:**")
+            st.code(student_attempt or "(none)")
+
         if eq_ltx:
             with st.expander("Show raw LaTeX (debug)"):
                 st.code(eq_ltx)

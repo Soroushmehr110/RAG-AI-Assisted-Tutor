@@ -1,0 +1,266 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- Design tokens (kept same) ---------- */
+:root {
+  --accent: #6C5CE7;
+  --accent-2: #4751FF;
+  --muted: #6B7280;
+  --success: #00B894;
+  --card-bg: #ffffff;
+}
+
+/* Basic page & card */
+body {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  background: linear-gradient(180deg,#ffffff 0%,#fbfbfd 100%);
+  color: #0f172a;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+.card {
+  background: var(--card-bg);
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(17,24,39,0.06);
+  padding: 1.25rem;
+}
+
+/* ---------- AUTH (Sign in / Register / Forgot) ---------- */
+.auth-wrapper {
+  min-height: calc(100vh - 96px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3.25rem 1rem; /* increased padding for breathing room */
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 520px;    /* slightly wider for better spacing */
+  border-radius: 14px;
+  padding: 1.5rem 1.5rem; /* increased padding */
+  box-shadow: 0 12px 36px rgba(17,24,39,0.06);
+  background: white;
+}
+
+/* heading inside card */
+.auth-card .title {
+  font-size: 1.325rem;
+  font-weight: 800;
+  color: var(--accent);
+  margin: 0;
+}
+.auth-card .subtitle {
+  font-size: 0.95rem;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+/* form rhythm */
+.form-row { margin-top: 1rem; margin-bottom: 1rem; } /* more vertical gap */
+.form-row label { display:block; font-weight:600; font-size:0.95rem; color:#374151; margin-bottom:8px; }
+.form-row input {
+  width:100%;
+  border: 1px solid rgba(17,24,39,0.06);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 1rem;
+  outline: none;
+}
+.form-row input:focus { box-shadow: 0 8px 22px rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.36); }
+
+/* password toggle */
+.password-toggle {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.9rem;
+  color: #374151;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+}
+
+/* buttons row - equal height, better spacing */
+.auth-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 1.125rem;
+}
+.auth-actions .btn {
+  flex: 1 1 0;
+  min-height: 48px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 1rem;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  cursor: pointer;
+  border: none;
+}
+
+/* both actions identical styling (primary look) */
+.btn-primary-auth {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: #fff;
+  box-shadow: 0 10px 26px rgba(76,67,160,0.12);
+}
+
+/* smaller link action style (for forgot password) */
+.form-footer { margin-top: 12px; display:flex; justify-content:space-between; align-items:center; gap:10px; font-size:0.94rem; color:var(--muted); }
+
+/* small message styles */
+.msg { font-size:0.96rem; color:var(--success); }
+.err { font-size:0.96rem; color:#dc2626; }
+
+/* responsive: stack buttons on small screens */
+@media (max-width: 520px) {
+  .auth-actions { flex-direction: column; }
+  .auth-actions .btn { width: 100%; }
+}
+
+/* ---------- Dashboard layout tweaks ---------- */
+
+/* make left column a bit wider per request (was 300 previously) */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr 420px; /* LEFT 360px, MIDDLE flexible, RIGHT 420px */
+  gap: 1.25rem;
+  align-items: start;
+  margin-bottom: 120px;
+}
+
+@media (max-width: 980px) {
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .left-col, .mid-col, .right-col { order: unset; }
+}
+
+/* Heads and cards inside dashboard */
+.card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.head-title { font-weight:800; font-size: 1rem; color:var(--accent); }
+.head-sub { font-size: 0.88rem; color: var(--muted); margin-top: 4px; }
+
+/* controls and image preview */
+.controls { display:flex; gap:12px; margin-top: 6px; }
+.controls .btn-ghost { padding: 10px 12px; border-radius: 10px; }
+.controls .btn-primary { padding: 10px 16px; border-radius: 10px; }
+
+/* preview box */
+.left-col .image-box { width: 100%; margin: 12px 0 0 0; min-height: 260px; display:flex; align-items:center; justify-content:center; border-radius: 12px; border: 1px solid rgba(17,24,39,0.06); padding:14px; background: rgba(249,250,251,0.9); }
+.left-col .image-box img { width: 100%; height: auto; object-fit: contain; border-radius: 8px; }
+
+/* empty preview */
+.empty-preview { display:flex; flex-direction:column; align-items:center; justify-content:center; color: #9CA3AF; }
+
+/* metadata */
+.kv { color: var(--muted); font-size: 0.92rem; }
+.msg { color: #16A34A; }
+.err { color: #DC2626; }
+
+/* score & progress */
+.score-row { display:flex; align-items:center; gap:12px; }
+.score-badge {
+  width:92px; height:92px; border-radius: 18px;
+  display:flex; align-items:center; justify-content:center; flex-direction:column;
+  background: linear-gradient(180deg, rgba(108,92,231,0.08), rgba(71,81,255,0.04));
+  box-shadow: 0 8px 26px rgba(76,67,160,0.06);
+  font-weight: 900; font-size: 28px; color: var(--accent);
+}
+.score-badge .score-percent { font-size: 14px; font-weight:600; color: var(--muted); margin-left: 4px; }
+
+/* progress bar - color applied inline through react */
+.progress { height: 12px; background: rgba(17,24,39,0.06); border-radius: 999px; overflow: hidden; }
+.progress > .bar { height:100%; border-radius:999px; transition: width 600ms ease; }
+
+/* mistakes list */
+.mistakes { list-style: disc; margin-left: 18px; color: #111827; }
+
+/* hint */
+.hint-box { padding: 12px; border-radius: 10px; background: linear-gradient(180deg, rgba(99,102,241,0.04), #fff); border: 1px solid rgba(99,102,241,0.05); }
+
+/* action buttons inside evaluation */
+.btn-secondary { background: linear-gradient(90deg, #F3F4FF, #FFF); color: #111827; border: none; padding: 10px 14px; border-radius: 10px; box-shadow: 0 8px 24px rgba(17,24,39,0.04); }
+.btn-ghost { background: transparent; border: 1px solid rgba(17,24,39,0.06); padding: 10px 12px; border-radius: 10px; }
+
+/* result card content */
+.result-card { padding: 1rem; }
+.result-card pre { white-space: pre-wrap; font-family: Inter, system-ui, -apple-system; font-size: 0.98rem; color: #111827; margin: 0; }
+
+/* hide any browser 'no file chosen' UI */
+input[type="file"][style], input[type="file"].hidden { display: none !important; }
+
+/* header spacing (since we removed left logo) */
+header .max-w-5xl { min-height: 56px; display: flex; align-items: center; }
+
+
+
+
+
+
+
+
+
+/* ------- containment & card adjustments to avoid overflow ------- */
+
+/* make sure cards and inner blocks use border-box so padding is included */
+.card, .auth-card, .auth-wrapper, .auth-card, .result-card, .left-col, .mid-col, .right-col {
+  box-sizing: border-box;
+}
+
+/* mid-column card spacing (ensures clear vertical rhythm) */
+.mid-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem; /* larger gap between Problem and Student Work */
+}
+
+/* ensure result cards contain content and scroll when needed */
+.result-card {
+  padding: 1rem;
+  border-radius: 12px;
+  overflow: hidden; /* contain shadows & elements */
+}
+
+/* card-block is where text goes; limit height to avoid spilling outside */
+.card-block {
+  /* padding inside card-block for clear breathing room */
+  padding: 0.35rem;
+}
+
+/* preformatted text inside cards: wrap, and make scrollable if very large */
+.result-card pre,
+.card-block pre {
+  white-space: pre-wrap; /* allow wrapping */
+  word-break: break-word;
+  max-height: 44vh; /* relative to viewport so it doesn't overflow the layout */
+  overflow: auto;
+  padding: 8px;
+  margin: 0;
+  border-radius: 8px;
+  background: transparent;
+}
+
+/* image preview containment (ensures images don't spill out) */
+.left-col .image-box { overflow: hidden; box-sizing: border-box; }
+.left-col .image-box img { display: block; max-width: 100%; height: auto; }
+
+/* ensure evaluation hint and rationale wrap nicely */
+.hint-box, .head-sub, .kv {
+  word-break: break-word;
+}
+
+/* small adjustment: increase space between header and grid */
+.dashboard-grid { margin-top: 8px; }
+
+/* keep consistent spacing on auth pages too (these classes were earlier defined, this strengthens them) */
+.auth-card { padding: 1.5rem; }
+.form-row input { box-sizing: border-box; }
+
+/* small responsive tweak: on very narrow screens reduce the card pre max height */
+@media (max-width: 520px) {
+  .result-card pre, .card-block pre { max-height: 36vh; }
+}

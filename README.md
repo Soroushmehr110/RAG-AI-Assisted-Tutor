@@ -1,136 +1,43 @@
-# Math-Teaching-Assistant
+# MathSight — Math Vision Grader (Demo)
 
-Lightweight tool that converts a math problem (student work allowed) into a structured, graded result using OCR + a large language model.
-It extracts the problem, understands the math, grades student attempts, generates step-by-step solutions, and provides scaffolded hints — all presented in a clean UI.
+## Overview
+MathSight enables users to upload or capture an image that contains a math problem and a student's handwritten solution (if present). The backend processes the image and uses AI models to:
 
----
-
-## Features
-
-* Image upload (PNG / JPG / JPEG / BMP) → OCR → LLM-based grading pipeline
-* Extracts problem statement and (if present) the student's attempt
-* Produces: problem restatement, topic, difficulty, full solution, scored rubric, component scores, and up to 3 hints (sorted)
-* Simple UI with math-aware inline rendering (Markdown + MathJax)
-* Downloadable structured JSON result for each run
-* Defensive parsing to handle a variety of grader outputs (strings, dicts, lists, None)
+- Preprocess the image (≤ 1MB)
+- Extract text using a vision-enabled model
+- Analyze the extracted text using an LLM to:
+  - Separate the problem statement from the student’s attempt
+  - Evaluate correctness
+  - Generate a helpful hint
 
 ---
 
-## Quick start
+## Backend Setup
 
-### Prerequisites
+### 1. Environment Variables
+Create a `.env` file in the `backend` directory or export environment variables:
+OPENAI_API_KEY=your_api_key_here
 
-* Python 3.10+
-* `pip` (or `poetry`)
-* An OpenAI API key set in the environment variable `OPENAI_API_KEY` (the grader uses the OpenAI API)
+Optional overrides:
+OPENAI_MODEL_VISION=your_vision_model
+OPENAI_MODEL_TEXT=your_text_model
 
-### Install system dependencies (Tesseract)
+bash
+Copy code
 
-* Ubuntu / Debian:
-
+### 2. Install Dependencies & Run Backend
 ```bash
-sudo apt-get update
-sudo apt-get install -y tesseract-ocr
-```
-
-* macOS (Homebrew):
-
-```bash
-brew install tesseract
-```
-
-### Create & activate virtual environment
-
-```bash
+cd backend
 python -m venv .venv
-source .venv/bin/activate         # macOS / Linux
-.venv\Scripts\activate            # Windows (PowerShell)
-```
-
-### Install Python dependencies
-
-Create a `requirements.txt` containing your dependencies (example below) and then:
-
-```bash
+source .venv/bin/activate
 pip install -r requirements.txt
-```
+uvicorn app.main:app --reload --port 8000
 
-### Configure environment
 
-Ensure your OpenAI API key is set:
 
-```bash
-export OPENAI_API_KEY="sk-...yourkey..."   # macOS / Linux
-# Windows (PowerShell)
-# setx OPENAI_API_KEY "sk-...yourkey..."
-```
+cd frontend
+npm run dev
 
-### Run the app
 
-```bash
-streamlit run app.py
-```
-
-Open the local URL printed by Streamlit (e.g. `http://localhost:8501`) and upload an image.
-
----
-
-## Output JSON (example snippet)
-
-```json
-{
-  "grader_result": {
-    "problem_text": "Solve: 2(x+3)-3(y-2)=6",
-    "topic": "Algebra",
-    "difficulty_assessment": "Medium",
-    "solution": {
-      "steps": [
-        "Expand: 2x+6-3y+6 = 6",
-        "Simplify: 2x - 3y + 12 = 6",
-        "Solve for x in terms of y: 2x = 3y - 6 => x = (3y-6)/2"
-      ],
-      "final_answer": "x = (3y-6)/2"
-    },
-    "student_attempt": null,
-    "score": 0,
-    "component_scores": {
-      "understanding": 0,
-      "execution": 0,
-      "accuracy": 0
-    },
-    "hints_sorted": [
-      "Start by expanding the left-hand side.",
-      "Combine like terms.",
-      "Isolate one variable in terms of the other."
-    ],
-    "first_hint": "Start by expanding the left-hand side."
-  },
-  "generated_at": "2025-08-25T17:18:07.472Z",
-  "source_file": "question1.png"
-}
-```
-
----
-
-## Repository layout
-
-```
-math-teaching-assistant/
-├─ app.py                     # Streamlit UI
-├─ math_image_grader.py       # OCR + LLM grader pipeline (exposes run_grader)
-├─ requirements.txt
-├─ README.md
-├─ examples/
-│  ├─ question1.png
-│  └─ sample_result.json
-├─ outputs/                   # where grader outputs are stored (auto-generated filenames)
-└─ tests/
-```
-
----
-
-## License
-
-This project is released under the **MIT License**. See `LICENSE` for details.
-
-# math-teaching-assistant
+# add new email to db:
+sqlite3 backend/app.db "INSERT INTO allowed_emails (email) VALUES('sample@gmail.com');"

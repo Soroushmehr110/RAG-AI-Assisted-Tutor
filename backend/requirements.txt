@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pillow
+openai
+sqlalchemy
+alembic
+passlib[bcrypt]
+python-jose[cryptography]
+pydantic
+python-multipart
+aiofiles
+email_validator
